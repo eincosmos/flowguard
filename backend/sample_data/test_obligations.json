@@ -1,32 +1,39 @@
 [
   {
+    "counterparty": "Client Payment",
+    "amount": 30000,
+    "due_date": "2026-03-25",
+    "category": "INCOME",
+    "direction": "IN",
+    "status": "PAST"
+  },
+  {
+    "counterparty": "Office Expense",
+    "amount": 10000,
+    "due_date": "2026-03-25",
+    "category": "OTHER",
+    "direction": "OUT",
+    "status": "PAST"
+  },
+  {
     "counterparty": "GST Department",
     "amount": 20000,
     "due_date": "2026-03-28",
-    "category": "TAX",
-    "is_recurring": false
+    "category": "GST",
+    "status": "PENDING"
   },
   {
-    "counterparty": "Sharma Suppliers",
-    "amount": 80000,
+    "counterparty": "Supplier A",
+    "amount": 40000,
     "due_date": "2026-03-27",
     "category": "SUPPLIER",
-    "relationship_score": 75,
-    "is_recurring": false
+    "status": "PENDING"
   },
   {
-    "counterparty": "Landlord Rajan",
-    "amount": 25000,
-    "due_date": "2026-03-30",
-    "category": "RENT",
-    "relationship_score": 85,
-    "is_recurring": true
-  },
-  {
-    "counterparty": "HDFC Bank EMI",
-    "amount": 15000,
-    "due_date": "2026-03-29",
-    "category": "LOAN",
-    "is_recurring": true
+    "counterparty": "Customer B",
+    "amount": 10000,
+    "due_date": "2026-03-27",
+    "category": "INCOME",
+    "status": "PENDING"
   }
 ]

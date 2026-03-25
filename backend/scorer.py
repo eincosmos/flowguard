@@ -116,3 +116,4 @@ def score_all(transactions: list, today: date = None) -> list:
         results.append(txn)
 
     return results
+    

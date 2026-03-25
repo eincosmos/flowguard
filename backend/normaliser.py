@@ -242,6 +242,9 @@ def normalize_input(raw_text: str,
 if __name__ == "__main__":
     text = "Landlord rent amount of 25k should be paid on or before March 30 2026"
     print(normalize_input(text))
+# =============================
+# MAIN PIPELINE
+# =============================
 
 def normalise_all(data):
     """
@@ -258,12 +261,12 @@ def normalise_all(data):
     if isinstance(data, list) and isinstance(data[0], dict):
 
         for item in data:
-            category = item.get("category", "OTHER")
+            category = item.get("category", "OTHER").upper()
 
             # enrichment
             penalty, weight, flexibility = _enrichment(category)
 
-            # --- FIX DATE ---
+            # --- DATE PARSING ---
             due_date_str = item.get("due_date")
             if due_date_str:
                 try:
@@ -273,9 +276,41 @@ def normalise_all(data):
             else:
                 due_date = None
 
+            # =============================
+            # 🔥 DIRECTION HANDLING (SMART)
+            # =============================
+            direction = item.get("direction")
+
+            if not direction:
+                # infer from category
+                if category in ["INCOME", "RECEIVABLE", "SALES"]:
+                    direction = "IN"
+                else:
+                    direction = "OUT"
+
+            direction = direction.upper()
+
+            # =============================
+            # 🔥 STATUS HANDLING (SAFE)
+            # =============================
+            status = item.get("status")
+
+            if not status:
+                # optional: auto-detect from date
+                if due_date and due_date < datetime.today().date():
+                    status = "PAST"
+                else:
+                    status = "PENDING"
+
+            status = status.upper()
+
+            # =============================
+            # BUILD TRANSACTION
+            # =============================
             tx = {
-                "amount": item.get("amount", 0.0),
-                "direction": "OUT",
+                "amount": max(item.get("amount", 0.0), 0),
+                "direction": direction,
+                "status": status,
                 "due_date": due_date,
                 "category": category,
                 "counterparty_name": item.get("counterparty"),
@@ -291,7 +326,7 @@ def normalise_all(data):
         return {"transactions": results}
 
     # =============================
-    # CASE 2: FILE INPUT (your original logic)
+    # CASE 2: FILE INPUT
     # =============================
     for f in data:
         with open(f, "r", errors="ignore") as file:
