@@ -1,302 +1,307 @@
-import csv
-import json
-import pdfplumber
-import pytesseract
-from PIL import Image
-from datetime import date
-from dateutil import parser as dateparser
-from typing import List, Dict, Optional
-from pathlib import Path
 import re
-
-from models import Transaction
-
-
-# ════════════════════════════════════════════════════════════════
-#  MAIN ENTRY
-# ════════════════════════════════════════════════════════════════
-
-def normalise_all(filepaths: List[str]) -> Dict:
-    all_transactions = []
-
-    for fp in filepaths:
-        ext = Path(fp).suffix.lower()
-
-        if ext == ".json":
-            txns = parse_manual_json(fp)
-        elif ext == ".csv":
-            txns = parse_bank_csv(fp)
-        elif ext == ".pdf":
-            txns = parse_bank_pdf(fp)
-        elif ext in [".jpg", ".png", ".jpeg"]:
-            txns = parse_receipt_image(fp)
-        else:
-            continue
-
-        all_transactions.extend(txns)
-
-    return {
-        "transactions": [t.to_dict() for t in all_transactions],
-        "stats": {
-            "total": len(all_transactions)
-        }
-    }
+import hashlib
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 
-# ════════════════════════════════════════════════════════════════
-#  JSON PARSER
-# ════════════════════════════════════════════════════════════════
+# =============================
+# DATA MODEL
+# =============================
+@dataclass
+class Transaction:
+    amount: float
+    direction: str  # IN | OUT
+    due_date: Optional[str]
+    category: str
+    counterparty_name: Optional[str]
+    flexibility: str = "DEFERRABLE"
+    penalty_rate_annual: float = 0.0
+    obligation_weight: float = 3.0
+    relationship_score: float = 50.0
+    is_recurring: bool = False
+    penalty_per_day: float = 0.0
+    source_hash: Optional[str] = None
+    source_file: Optional[str] = None
+    confidence: float = 0.0
 
-def parse_manual_json(filepath: str):
-    transactions = []
 
-    with open(filepath, "r") as f:
-        data = json.load(f)
+# =============================
+# NORMALIZATION
+# =============================
+_OCR_MAP = str.maketrans({
+    "O": "0", "o": "0",
+    "I": "1", "l": "1", "|": "1",
+    "S": "5", "s": "5",
+    "B": "8",
+    "₹": ""
+})
 
-    for item in data:
+def _normalize_text(text: str) -> str:
+    text = text.translate(_OCR_MAP)
+
+    # Remove multi-character currency strings
+    text = re.sub(r'\b(rs\.?|inr\.?)\b', '', text, flags=re.I)
+
+    # 25k → 25000
+    text = re.sub(r'(\d+)\s*k\b',
+                  lambda m: str(int(m.group(1)) * 1000),
+                  text, flags=re.I)
+
+    # 31 800 → 31800
+    text = re.sub(r'(\d)\s+(\d{3})', r'\1\2', text)
+
+    return text
+
+
+# =============================
+# AMOUNT EXTRACTION
+# =============================
+_AMOUNT_PATTERN = re.compile(
+    r'(?<!\w)(?:₹|rs\.?|inr\.?)?\s*((?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?)(?!\w)',
+    re.IGNORECASE
+)
+
+
+def _extract_amount(text: str) -> Optional[float]:
+    matches = []
+
+    for m in _AMOUNT_PATTERN.finditer(text):
+        raw = m.group(0)
+        num = m.group(1).replace(",", "")
+
         try:
-            t = Transaction(
-                amount=float(item["amount"]),
-                direction=item.get("direction", "OUT"),
-                due_date=_parse_date(item["due_date"]),
-                category=item.get("category", "OTHER"),
-                counterparty_name=item.get("counterparty", "Unknown"),
-                source_file=filepath,
-            )
-            t.compute_derived_fields()
-            transactions.append(t)
+            val = float(num)
         except:
-            pass
-
-    return transactions
-
-
-# ════════════════════════════════════════════════════════════════
-#  CSV PARSER
-# ════════════════════════════════════════════════════════════════
-
-def parse_bank_csv(filepath: str):
-    transactions = []
-
-    with open(filepath, "r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-
-        for row in reader:
-            amount = abs(_clean_number(row.get("amount", "0")))
-            if amount == 0:
-                continue
-
-            desc = row.get("description", "")
-            txn_date = _parse_date(row.get("date", ""))
-
-            t = Transaction(
-                amount=amount,
-                direction="OUT",
-                due_date=txn_date,
-                category=_infer_category(desc),
-                counterparty_name=_extract_counterparty(desc),
-                source_file=filepath,
-                raw_text=desc,
-            )
-            t.compute_derived_fields()
-            transactions.append(t)
-
-    return transactions
-
-
-# ════════════════════════════════════════════════════════════════
-#  PDF PARSER
-# ════════════════════════════════════════════════════════════════
-
-def parse_bank_pdf(filepath: str):
-    transactions = []
-    lines = []
-
-    with pdfplumber.open(filepath) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                lines.extend(text.split("\n"))
-
-    pattern = re.compile(
-        r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\s+(.+?)\s+([\d,]+\.?\d*)"
-    )
-
-    for line in lines:
-        match = pattern.search(line)
-        if not match:
             continue
 
-        t = Transaction(
-            amount=_clean_number(match.group(3)),
-            direction="OUT",
-            due_date=_parse_date(match.group(1)),
-            category=_infer_category(match.group(2)),
-            counterparty_name=_extract_counterparty(match.group(2)),
-            source_file=filepath,
-            raw_text=line,
-        )
-        t.compute_derived_fields()
-        transactions.append(t)
+        score = 0.5
 
-    return transactions
+        if "₹" in raw or "rs" in raw.lower():
+            score += 0.3
+        if "." in num:
+            score += 0.1
 
+        matches.append((val, score, m.start()))
 
-# ════════════════════════════════════════════════════════════════
-#  OCR PARSER (ADVANCED)
-# ════════════════════════════════════════════════════════════════
-
-def parse_receipt_image(filepath: str):
-    transactions = []
-
-    img = Image.open(filepath).convert("L")
-    raw_text = pytesseract.image_to_string(img)
-    raw_text = _clean_ocr_text(raw_text)
-
-    print(f"\n[OCR TEXT]\n{raw_text}\n")
-
-    amount = _extract_amount_advanced(raw_text)
-
-    if not amount:
-        print(f"[ERROR] Amount extraction failed:\n{raw_text}\n")
-        return []
-
-    txn_date = _extract_date(raw_text)
-    due_date = _extract_due_date(raw_text)
-
-    doc_type = "OBLIGATION" if "due" in raw_text.lower() else "TRANSACTION"
-
-    direction = "OUT" if doc_type == "OBLIGATION" else _infer_direction(raw_text)
-
-    t = Transaction(
-        amount=amount,
-        direction=direction,
-        due_date=due_date,
-        category=_infer_category(raw_text),
-        counterparty_name=_extract_counterparty(raw_text),
-        source_file=filepath,
-        raw_text=raw_text,
-    )
-
-    t.compute_derived_fields()
-    transactions.append(t)
-
-    return transactions
-
-
-# ════════════════════════════════════════════════════════════════
-#  ADVANCED AMOUNT EXTRACTION (KEY FIX)
-# ════════════════════════════════════════════════════════════════
-
-def _extract_amount_advanced(text: str) -> Optional[float]:
-    text = text.lower()
-    text = _normalize_ocr_numbers(text)
-
-    candidates = []
-
-    # ❌ REMOVE LONG IDs
-    text = re.sub(r"\b\d{9,}\b", " ", text)
-
-    # ❌ REMOVE TIMES
-    text = re.sub(r"\b\d{1,2}:\d{2}\b", " ", text)
-
-    # ❌ REMOVE DATES (CRITICAL FIX)
-    text = re.sub(r"\b\d{1,2}\s+[a-z]{3,}\s+\d{4}\b", " ", text)  # 25 mar 2026
-    text = re.sub(r"\b\d{4}\b", " ", text)  # standalone years like 2026
-
-    # 🔹 STEP 1: Labeled (BEST)
-    for p in [r"(?:amount|paid|debited|credited)\s*[:\-]?\s*₹?\s*([0-9,\.]+)"]:
-        for m in re.findall(p, text):
-            val = _clean_number(m)
-            if 1 <= val <= 1000000:
-                return val
-
-    # 🔹 STEP 2: ₹ / Rs
-    for p in [r"₹\s*([0-9,\.]+)", r"rs\.?\s*([0-9,\.]+)"]:
-        for m in re.findall(p, text):
-            val = _clean_number(m)
-            if 1 <= val <= 1000000:
-                candidates.append((val, 3))
-
-    # 🔹 STEP 3: CONTEXT (KEY)
-    words = text.split()
-
-    for i, w in enumerate(words):
-        if w.isdigit():
-            val = float(w)
-
-            # reject unrealistic
-            if val > 50000 or val < 1:
-                continue
-
-            context = " ".join(words[max(0, i-3):i+3])
-
-            score = 0
-            if "completed" in context or "paid" in context:
-                score += 4
-            if "to" in context:
-                score += 2
-            if "upi" in context:
-                score += 1
-
-            if score > 0:
-                candidates.append((val, score))
-
-    # 🔹 STEP 4: fallback (SAFE)
-    for m in re.findall(r"\b\d{2,5}\b", text):
-        val = float(m)
-        if 1 <= val <= 50000:
-            candidates.append((val, 1))
-
-    if not candidates:
+    if not matches:
         return None
 
-    # 🎯 FINAL: highest score first, then closest to realistic txn range
-    candidates.sort(key=lambda x: (x[1], -abs(x[0] - 500)), reverse=True)
+    matches.sort(key=lambda x: (x[1], -x[2]), reverse=True)
+    return matches[0][0]
 
-    return candidates[0][0]
-# ════════════════════════════════════════════════════════════════
-#  HELPERS
-# ════════════════════════════════════════════════════════════════
 
-def _normalize_ocr_numbers(text: str) -> str:
-    table = str.maketrans({"O":"0","l":"1","S":"5"})
-    return " ".join([t.translate(table) if re.search(r"\d", t) else t for t in text.split()])
+# =============================
+# DATE EXTRACTION
+# =============================
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12
+}
 
-def _clean_ocr_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"[^\w₹Rs\.\-\s:]", " ", text)
-    return text.strip()
 
-def _extract_date(text: str):
-    m = re.search(r"\d{1,2}\s+[A-Za-z]+\s+\d{4}", text)
-    return dateparser.parse(m.group()).date() if m else None
+def _extract_due_date(text: str) -> Optional[str]:
+    t = text.lower()
 
-def _extract_due_date(text: str):
-    m = re.search(r"(due on|due date).*?(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})", text, re.I)
-    return dateparser.parse(m.group(2)).date() if m else None
+    # 30/03/2026
+    m = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b', t)
+    if m:
+        d, mo, y = map(int, m.groups())
+        if y < 100:
+            y += 2000
+        return datetime(y, mo, d).strftime("%Y-%m-%d")
 
-def _infer_direction(text: str):
-    return "IN" if "received" in text.lower() else "OUT"
+    # March 30 2026
+    m = re.search(
+        r'\b(' + '|'.join(_MONTHS.keys()) + r')\s+(\d{1,2})(?:,)?\s+(\d{4})\b', t)
+    if m:
+        mo = _MONTHS[m.group(1)]
+        d = int(m.group(2))
+        y = int(m.group(3))
+        return datetime(y, mo, d).strftime("%Y-%m-%d")
 
-def _infer_category(text: str):
-    text = text.lower()
-    if "tax" in text: return "TAX"
-    if "rent" in text: return "RENT"
-    if "loan" in text: return "LOAN"
+    return None
+
+
+# =============================
+# CATEGORY + DIRECTION
+# =============================
+def _infer_category(text: str) -> str:
+    t = text.lower()
+    if "rent" in t or "landlord" in t:
+        return "RENT"
+    if "tax" in t or "gst" in t:
+        return "TAX"
+    if "salary" in t:
+        return "SALARY"
+    if "supplier" in t or "vendor" in t:
+        return "SUPPLIER"
+    if "loan" in t or "emi" in t:
+        return "LOAN"
     return "OTHER"
 
-def _extract_counterparty(text: str):
-    return " ".join(text.split()[:3]).title()
 
-def _clean_number(x: str):
-    try:
-        return float(x.replace(",", "").replace("₹", "").replace("Rs", ""))
-    except:
-        return 0.0
+def _infer_direction(text: str) -> str:
+    t = text.lower()
+    if any(x in t for x in ["received", "credited"]):
+        return "IN"
+    return "OUT"
 
-def _parse_date(x: str):
-    try:
-        return dateparser.parse(str(x)).date()
-    except:
-        return date.today()
+
+# =============================
+# COUNTERPARTY
+# =============================
+def _extract_counterparty(text: str) -> Optional[str]:
+    t = text.lower()
+
+    if "landlord" in t:
+        return "Landlord"
+    if "owner" in t:
+        return "Owner"
+
+    patterns = [
+        r'paid to\s+([a-z\s]+)',
+        r'received from\s+([a-z\s]+)',
+        r'to\s+([a-z\s]+)\s+on'
+    ]
+
+    for p in patterns:
+        m = re.search(p, t)
+        if m:
+            name = m.group(1).strip()
+            return " ".join(w.capitalize() for w in name.split())
+
+    return None
+
+
+# =============================
+# ENRICHMENT
+# =============================
+def _enrichment(category: str):
+    mapping = {
+        "TAX": (0.18, 5.0, "FIXED"),
+        "RENT": (0.12, 4.5, "FIXED"),
+        "SUPPLIER": (0.06, 3.5, "DEFERRABLE"),
+        "SALARY": (0.0, 5.0, "FIXED"),
+        "LOAN": (0.14, 5.0, "FIXED"),
+    }
+    return mapping.get(category, (0.0, 3.0, "DEFERRABLE"))
+
+
+# =============================
+# HASH
+# =============================
+def _build_hash(amount, cp, date, text):
+    raw = f"{amount}|{cp}|{date}|{text[:200]}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# =============================
+# MAIN PIPELINE
+# =============================
+def normalize_input(raw_text: str,
+                    source_file: Optional[str] = None) -> Dict[str, Any]:
+
+    text = _normalize_text(raw_text)
+
+    amount = _extract_amount(text)
+    due_date = _extract_due_date(text)
+    category = _infer_category(text)
+    direction = _infer_direction(text)
+    counterparty = _extract_counterparty(text)
+
+    penalty, weight, flexibility = _enrichment(category)
+
+    confidence = 0.3
+    if amount: confidence += 0.3
+    if due_date: confidence += 0.15
+    if counterparty: confidence += 0.15
+    if category != "OTHER": confidence += 0.1
+
+    tx = Transaction(
+        amount=amount or 0.0,
+        direction=direction,
+        due_date=due_date,
+        category=category,
+        counterparty_name=counterparty,
+        flexibility=flexibility,
+        penalty_rate_annual=penalty,
+        obligation_weight=weight,
+        source_hash=_build_hash(amount, counterparty, due_date, raw_text),
+        source_file=source_file,
+        confidence=round(min(confidence, 0.99), 2)
+    )
+
+    return asdict(tx)
+
+
+# =============================
+# TEST
+# =============================
+if __name__ == "__main__":
+    text = "Landlord rent amount of 25k should be paid on or before March 30 2026"
+    print(normalize_input(text))
+
+def normalise_all(data):
+    """
+    Supports:
+    1. JSON input (list of dicts) ✅
+    2. File paths (OCR/text) ✅
+    """
+
+    results = []
+
+    # =============================
+    # CASE 1: JSON INPUT (your test case)
+    # =============================
+    if isinstance(data, list) and isinstance(data[0], dict):
+
+        for item in data:
+            category = item.get("category", "OTHER")
+
+            # enrichment
+            penalty, weight, flexibility = _enrichment(category)
+
+            # --- FIX DATE ---
+            due_date_str = item.get("due_date")
+            if due_date_str:
+                try:
+                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+                except:
+                    due_date = None
+            else:
+                due_date = None
+
+            tx = {
+                "amount": item.get("amount", 0.0),
+                "direction": "OUT",
+                "due_date": due_date,
+                "category": category,
+                "counterparty_name": item.get("counterparty"),
+                "flexibility": flexibility,
+                "penalty_rate_annual": penalty,
+                "obligation_weight": weight,
+                "relationship_score": item.get("relationship_score", 50),
+                "is_recurring": item.get("is_recurring", False),
+            }
+
+            results.append(tx)
+
+        return {"transactions": results}
+
+    # =============================
+    # CASE 2: FILE INPUT (your original logic)
+    # =============================
+    for f in data:
+        with open(f, "r", errors="ignore") as file:
+            text = file.read()
+
+        results.append(normalize_input(text, source_file=f))
+
+    return {
+        "transactions": results,
+        "stats": {
+            "count": len(results)
+        }
+    }
