@@ -1,0 +1,40 @@
+[
+  {
+    "counterparty": "GST Department",
+    "amount": 20000,
+    "due_date": "2026-03-28",
+    "category": "TAX",
+    "is_recurring": false
+  },
+  {
+    "counterparty": "Sharma Suppliers",
+    "amount": 80000,
+    "due_date": "2026-03-27",
+    "category": "SUPPLIER",
+    "relationship_score": 75,
+    "is_recurring": false
+  },
+  {
+    "counterparty": "Landlord Rajan",
+    "amount": 25000,
+    "due_date": "2026-03-30",
+    "category": "RENT",
+    "relationship_score": 85,
+    "is_recurring": true
+  },
+  {
+    "counterparty": "HDFC Bank EMI",
+    "amount": 15000,
+    "due_date": "2026-03-29",
+    "category": "LOAN",
+    "is_recurring": true
+  },
+    {
+    "counterparty": "HDFC Bank EMI",
+    "amount": 15000,
+    "due_date": "2026-03-29",
+    "category": "LOAN",
+    "is_recurring": true,
+    "direction": "OUT"
+  }
+]
