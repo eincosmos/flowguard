@@ -10,7 +10,7 @@
   {
     "counterparty": "Office Expense",
     "amount": 10000,
-    "due_date": "2026-03-25",
+    "due_date": "2026-03-24",
     "category": "OTHER",
     "direction": "OUT",
     "status": "PAST"
